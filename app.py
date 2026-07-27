@@ -19,9 +19,12 @@ def load_databases():
     df_cli = pd.read_excel("DB_Clientes_Limpia.xlsx")
     df_prod = pd.read_excel("DB_Productos_Unificada.xlsx")
     
+    # 🔴 REGLA CLAVE: Forzar que todos los códigos sean TEXTO y sin espacios
+    df_prod['Codigo'] = df_prod['Codigo'].astype(str).str.strip()
+    
     # Asegurar que el precio de lista sea numérico
     df_prod['Precio_Lista'] = pd.to_numeric(df_prod['Precio_Lista'], errors='coerce').fillna(0)
-    df_prod['Precio_Oferta'] = 0.0 # Columna por defecto
+    df_prod['Precio_Oferta'] = 0.0 
     df_prod['Es_Oferta'] = False
     
     # Buscar dinámicamente archivos de oferta en la carpeta
@@ -32,7 +35,6 @@ def load_databases():
             df_of = pd.read_excel(archivo)
             df_of.columns = [str(c).strip().upper() for c in df_of.columns]
             
-            # Buscar columnas clave
             col_codigo = "CÓDIGO" if "CÓDIGO" in df_of.columns else "CODIGO" if "CODIGO" in df_of.columns else None
             col_precio = [c for c in df_of.columns if "PRECIO" in c]
             
@@ -40,6 +42,9 @@ def load_databases():
                 col_precio = col_precio[0]
                 df_of_limpio = df_of[[col_codigo, col_precio]].copy()
                 df_of_limpio.columns = ['Codigo', 'Precio_Promocional']
+                
+                # 🔴 REGLA CLAVE: Forzar el mismo formato de texto en las Ofertas
+                df_of_limpio['Codigo'] = df_of_limpio['Codigo'].astype(str).str.strip()
                 df_of_limpio['Precio_Promocional'] = pd.to_numeric(df_of_limpio['Precio_Promocional'], errors='coerce').fillna(0)
                 
                 # Cruzar con el catálogo maestro
@@ -100,7 +105,6 @@ if busqueda:
 
 st.markdown("##### Agregar al Pedido")
 if not df_filtrado.empty:
-    # Armar display visual diferenciando ofertas
     def format_display(row):
         precio = row['Precio_Oferta'] if row['Es_Oferta'] else row['Precio_Lista']
         etiqueta = "🔥 OFERTA NETO | " if row['Es_Oferta'] else ""
@@ -139,7 +143,6 @@ st.subheader("3. Resumen del Pedido")
 if st.session_state.carrito:
     df_carrito = pd.DataFrame(st.session_state.carrito)
     
-    # Mostrar tabla visual
     df_mostrar = df_carrito[['Codigo', 'Descripcion', 'Cantidad', 'Precio_Unitario', 'Es_Oferta', 'Subtotal_Bruto']].copy()
     df_mostrar['Es_Oferta'] = df_mostrar['Es_Oferta'].apply(lambda x: "Sí (Neto)" if x else "No")
     st.dataframe(df_mostrar, use_container_width=True)
@@ -159,7 +162,6 @@ if st.session_state.carrito:
     descuentos_usados = [f"-{d}%" for d in [desc_gen, desc_ad1, desc_ad2] if d > 0]
     texto_descuentos = " ".join(descuentos_usados) if descuentos_usados else "Sin bonificación"
 
-    # Cálculo diferenciado: Las ofertas NO reciben descuento
     df_carrito['Neto_Calculado'] = df_carrito.apply(
         lambda row: row['Subtotal_Bruto'] if row['Es_Oferta'] else (row['Subtotal_Bruto'] * multiplicador_desc), 
         axis=1
@@ -202,7 +204,6 @@ if st.session_state.carrito:
         pdf.set_font("Arial", '', 8)
         for _, row in df_carrito.iterrows():
             desc_corta = str(row['Descripcion'])[:45]
-            # Marcar con asterisco si es oferta neta
             marca_oferta = " (*NETO)" if row['Es_Oferta'] else ""
             desc_final = desc_corta + marca_oferta
             
