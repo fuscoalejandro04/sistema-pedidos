@@ -66,6 +66,10 @@ if busqueda:
 # Selector para agregar al pedido
 st.markdown("##### Agregar al Pedido")
 if not df_filtrado.empty:
+    # 1. Forzar que todos los precios sean estrictamente números (convierte textos raros o vacíos a 0)
+    df_filtrado['Precio_Lista'] = pd.to_numeric(df_filtrado['Precio_Lista'], errors='coerce').fillna(0)
+    
+    # 2. Armar el texto para mostrar en el selector
     df_filtrado['Display'] = df_filtrado['Codigo'].astype(str) + " | " + df_filtrado['Descripcion'].astype(str) + " | $" + df_filtrado['Precio_Lista'].round(2).astype(str)
     
     col_sel, col_qty, col_btn = st.columns([3, 1, 1])
