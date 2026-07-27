@@ -3,21 +3,58 @@ import pandas as pd
 from fpdf import FPDF
 import tempfile
 import os
+import glob
 
 st.set_page_config(page_title="Gestión de Pedidos", layout="wide", initial_sidebar_state="expanded")
 
 st.title("📦 Sistema de Carga de Pedidos")
 st.markdown("---")
 
-# Inicializar el carrito en la memoria de la sesión
 if 'carrito' not in st.session_state:
     st.session_state.carrito = []
 
-# 1. CARGAR DATOS
+# 1. CARGAR DATOS Y DETECTAR OFERTAS
 @st.cache_data
 def load_databases():
     df_cli = pd.read_excel("DB_Clientes_Limpia.xlsx")
     df_prod = pd.read_excel("DB_Productos_Unificada.xlsx")
+    
+    # Asegurar que el precio de lista sea numérico
+    df_prod['Precio_Lista'] = pd.to_numeric(df_prod['Precio_Lista'], errors='coerce').fillna(0)
+    df_prod['Precio_Oferta'] = 0.0 # Columna por defecto
+    df_prod['Es_Oferta'] = False
+    
+    # Buscar dinámicamente archivos de oferta en la carpeta
+    archivos_oferta = glob.glob("*oferta*.xls*") + glob.glob("*OFERTA*.xls*")
+    
+    for archivo in archivos_oferta:
+        try:
+            df_of = pd.read_excel(archivo)
+            df_of.columns = [str(c).strip().upper() for c in df_of.columns]
+            
+            # Buscar columnas clave
+            col_codigo = "CÓDIGO" if "CÓDIGO" in df_of.columns else "CODIGO" if "CODIGO" in df_of.columns else None
+            col_precio = [c for c in df_of.columns if "PRECIO" in c]
+            
+            if col_codigo and col_precio:
+                col_precio = col_precio[0]
+                df_of_limpio = df_of[[col_codigo, col_precio]].copy()
+                df_of_limpio.columns = ['Codigo', 'Precio_Promocional']
+                df_of_limpio['Precio_Promocional'] = pd.to_numeric(df_of_limpio['Precio_Promocional'], errors='coerce').fillna(0)
+                
+                # Cruzar con el catálogo maestro
+                df_prod = pd.merge(df_prod, df_of_limpio, on='Codigo', how='left')
+                
+                # Actualizar los que tienen oferta
+                condicion_oferta = df_prod['Precio_Promocional'] > 0
+                df_prod.loc[condicion_oferta, 'Precio_Oferta'] = df_prod.loc[condicion_oferta, 'Precio_Promocional']
+                df_prod.loc[condicion_oferta, 'Es_Oferta'] = True
+                
+                # Limpiar columna temporal
+                df_prod = df_prod.drop(columns=['Precio_Promocional'])
+        except Exception as e:
+            st.sidebar.warning(f"No se pudo procesar el archivo de oferta {archivo}: {e}")
+
     return df_cli, df_prod
 
 try:
@@ -38,8 +75,6 @@ if 'DENOMINACÍON LEGAL' in df_clientes.columns:
     col2.metric("Localidad", str(cli_info.get('LOCALIDAD', '-')))
     col3.metric("Condición de Pago", str(cli_info.get('FORMA DE PAGO', '-')))
     col4.metric("Vendedor", str(cli_info.get('NOMB.VENDEDOR', '-')))
-else:
-    st.warning("No se encontró la base de clientes.")
 
 st.markdown("---")
 
@@ -63,14 +98,15 @@ if busqueda:
         df_filtrado['Descripcion'].astype(str).str.upper().str.contains(b_up)
     ]
 
-# Selector para agregar al pedido
 st.markdown("##### Agregar al Pedido")
 if not df_filtrado.empty:
-    # 1. Forzar que todos los precios sean estrictamente números (convierte textos raros o vacíos a 0)
-    df_filtrado['Precio_Lista'] = pd.to_numeric(df_filtrado['Precio_Lista'], errors='coerce').fillna(0)
-    
-    # 2. Armar el texto para mostrar en el selector
-    df_filtrado['Display'] = df_filtrado['Codigo'].astype(str) + " | " + df_filtrado['Descripcion'].astype(str) + " | $" + df_filtrado['Precio_Lista'].round(2).astype(str)
+    # Armar display visual diferenciando ofertas
+    def format_display(row):
+        precio = row['Precio_Oferta'] if row['Es_Oferta'] else row['Precio_Lista']
+        etiqueta = "🔥 OFERTA NETO | " if row['Es_Oferta'] else ""
+        return f"{etiqueta}{row['Codigo']} | {row['Descripcion']} | ${precio:,.2f}"
+        
+    df_filtrado['Display'] = df_filtrado.apply(format_display, axis=1)
     
     col_sel, col_qty, col_btn = st.columns([3, 1, 1])
     prod_seleccionado = col_sel.selectbox("Seleccione el producto:", options=df_filtrado['Display'].tolist())
@@ -80,14 +116,16 @@ if not df_filtrado.empty:
         prod_idx = df_filtrado[df_filtrado['Display'] == prod_seleccionado].index[0]
         prod_data = df_filtrado.loc[prod_idx]
         
+        precio_usar = prod_data['Precio_Oferta'] if prod_data['Es_Oferta'] else prod_data['Precio_Lista']
+        
         st.session_state.carrito.append({
-            "Marca": prod_data['Marca'],
             "Codigo": prod_data['Codigo'],
             "Descripcion": prod_data['Descripcion'],
-            "Precio_Lista": prod_data['Precio_Lista'],
-            "IVA": prod_data['IVA'],
             "Cantidad": cantidad,
-            "Subtotal": prod_data['Precio_Lista'] * cantidad
+            "Precio_Unitario": precio_usar,
+            "Es_Oferta": prod_data['Es_Oferta'],
+            "IVA": prod_data['IVA'],
+            "Subtotal_Bruto": precio_usar * cantidad
         })
         st.success(f"¡Agregado: {cantidad}x {prod_data['Codigo']}!")
 else:
@@ -100,41 +138,41 @@ st.subheader("3. Resumen del Pedido")
 
 if st.session_state.carrito:
     df_carrito = pd.DataFrame(st.session_state.carrito)
-    st.dataframe(df_carrito[['Codigo', 'Descripcion', 'Cantidad', 'Precio_Lista', 'Subtotal']], use_container_width=True)
+    
+    # Mostrar tabla visual
+    df_mostrar = df_carrito[['Codigo', 'Descripcion', 'Cantidad', 'Precio_Unitario', 'Es_Oferta', 'Subtotal_Bruto']].copy()
+    df_mostrar['Es_Oferta'] = df_mostrar['Es_Oferta'].apply(lambda x: "Sí (Neto)" if x else "No")
+    st.dataframe(df_mostrar, use_container_width=True)
     
     if st.button("🗑️ Vaciar Carrito"):
         st.session_state.carrito = []
         st.rerun()
 
     st.markdown("#### Bonificaciones y Cierre")
-    
-    # Configuramos las columnas para los descuentos individuales
     col_desc1, col_desc2, col_desc3, col_totales = st.columns([1, 1, 1, 2])
     
     desc_gen = col_desc1.number_input("Desc. General (%)", min_value=0.0, max_value=100.0, value=30.0, step=1.0)
     desc_ad1 = col_desc2.number_input("Desc. Adicional 1 (%)", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
     desc_ad2 = col_desc3.number_input("Desc. Adicional 2 (%)", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
     
-    # Calcular cascada de multiplicadores
     multiplicador_desc = (1 - (desc_gen / 100)) * (1 - (desc_ad1 / 100)) * (1 - (desc_ad2 / 100))
-    
-    # Armar un texto limpio para el PDF solo con los descuentos que se usaron
     descuentos_usados = [f"-{d}%" for d in [desc_gen, desc_ad1, desc_ad2] if d > 0]
     texto_descuentos = " ".join(descuentos_usados) if descuentos_usados else "Sin bonificación"
 
-    # Calcular totales
-    subtotal_bruto = df_carrito['Subtotal'].sum()
-    subtotal_neto = subtotal_bruto * multiplicador_desc
+    # Cálculo diferenciado: Las ofertas NO reciben descuento
+    df_carrito['Neto_Calculado'] = df_carrito.apply(
+        lambda row: row['Subtotal_Bruto'] if row['Es_Oferta'] else (row['Subtotal_Bruto'] * multiplicador_desc), 
+        axis=1
+    )
+    df_carrito['Monto_IVA'] = df_carrito['Neto_Calculado'] * df_carrito['IVA']
     
-    df_carrito['Neto_Unitario'] = df_carrito['Precio_Lista'] * multiplicador_desc
-    df_carrito['Subtotal_Neto'] = df_carrito['Neto_Unitario'] * df_carrito['Cantidad']
-    df_carrito['Monto_IVA'] = df_carrito['Subtotal_Neto'] * df_carrito['IVA']
-    
+    total_bruto = df_carrito['Subtotal_Bruto'].sum()
+    total_neto = df_carrito['Neto_Calculado'].sum()
     total_iva = df_carrito['Monto_IVA'].sum()
-    total_final = subtotal_neto + total_iva
+    total_final = total_neto + total_iva
 
-    col_totales.metric("Subtotal Bruto", f"${subtotal_bruto:,.2f}")
-    col_totales.metric(f"Neto ({texto_descuentos})", f"${subtotal_neto:,.2f}")
+    col_totales.metric("Subtotal Bruto", f"${total_bruto:,.2f}")
+    col_totales.metric(f"Neto (Desc. aplicados)", f"${total_neto:,.2f}")
     col_totales.metric("Total Final (Inc. IVA)", f"${total_final:,.2f}")
 
     # 5. EXPORTACIÓN A PDF
@@ -146,7 +184,6 @@ if st.session_state.carrito:
         pdf.cell(0, 10, "PROFORMA DE PEDIDO", ln=True, align='C')
         pdf.ln(5)
         
-        # Datos del Cliente
         pdf.set_font("Arial", 'B', 10)
         pdf.cell(0, 6, f"Cliente: {cliente_seleccionado}", ln=True)
         pdf.set_font("Arial", '', 10)
@@ -154,42 +191,46 @@ if st.session_state.carrito:
         pdf.cell(0, 6, f"Vendedor: {cli_info.get('NOMB.VENDEDOR', '-')}", ln=True)
         pdf.ln(10)
         
-        # Encabezados de Tabla
         pdf.set_font("Arial", 'B', 9)
-        pdf.cell(30, 8, "Codigo", border=1)
-        pdf.cell(90, 8, "Descripcion", border=1)
+        pdf.cell(25, 8, "Codigo", border=1)
+        pdf.cell(85, 8, "Descripcion", border=1)
         pdf.cell(15, 8, "Cant", border=1, align='C')
-        pdf.cell(30, 8, "P. Unitario", border=1, align='R')
-        pdf.cell(30, 8, "Subtotal", border=1, align='R')
+        pdf.cell(30, 8, "P. Unit", border=1, align='R')
+        pdf.cell(35, 8, "Subtotal Neto", border=1, align='R')
         pdf.ln()
         
-        # Filas de Productos
         pdf.set_font("Arial", '', 8)
         for _, row in df_carrito.iterrows():
-            desc_corta = str(row['Descripcion'])[:50]
-            pdf.cell(30, 6, str(row['Codigo']), border=1)
-            pdf.cell(90, 6, desc_corta, border=1)
+            desc_corta = str(row['Descripcion'])[:45]
+            # Marcar con asterisco si es oferta neta
+            marca_oferta = " (*NETO)" if row['Es_Oferta'] else ""
+            desc_final = desc_corta + marca_oferta
+            
+            pdf.cell(25, 6, str(row['Codigo']), border=1)
+            pdf.cell(85, 6, desc_final, border=1)
             pdf.cell(15, 6, str(row['Cantidad']), border=1, align='C')
-            pdf.cell(30, 6, f"${row['Precio_Lista']:,.2f}", border=1, align='R')
-            pdf.cell(30, 6, f"${row['Subtotal']:,.2f}", border=1, align='R')
+            pdf.cell(30, 6, f"${row['Precio_Unitario']:,.2f}", border=1, align='R')
+            pdf.cell(35, 6, f"${row['Neto_Calculado']:,.2f}", border=1, align='R')
             pdf.ln()
             
-        # Totales
         pdf.ln(5)
+        pdf.set_font("Arial", 'I', 8)
+        pdf.cell(0, 5, "(*) Los articulos marcados como NETO no reciben descuentos comerciales adicionales.", ln=True)
+        pdf.ln(2)
+        
         pdf.set_font("Arial", 'B', 10)
-        pdf.cell(165, 6, "Subtotal Bruto:", align='R')
-        pdf.cell(30, 6, f"${subtotal_bruto:,.2f}", align='R')
+        pdf.cell(160, 6, "Subtotal Bruto (Sin Desc):", align='R')
+        pdf.cell(30, 6, f"${total_bruto:,.2f}", align='R')
         pdf.ln()
-        pdf.cell(165, 6, f"Bonificaciones ({texto_descuentos}):", align='R')
-        pdf.cell(30, 6, f"${subtotal_neto:,.2f}", align='R')
+        pdf.cell(160, 6, f"Bonificaciones ({texto_descuentos}):", align='R')
+        pdf.cell(30, 6, f"${total_neto:,.2f}", align='R')
         pdf.ln()
-        pdf.cell(165, 6, "IVA Total:", align='R')
+        pdf.cell(160, 6, "IVA Total:", align='R')
         pdf.cell(30, 6, f"${total_iva:,.2f}", align='R')
         pdf.ln()
-        pdf.cell(165, 8, "TOTAL FINAL:", align='R')
+        pdf.cell(160, 8, "TOTAL FINAL:", align='R')
         pdf.cell(30, 8, f"${total_final:,.2f}", align='R')
         
-        # Guardar temporalmente y permitir descarga
         fd, path = tempfile.mkstemp(suffix=".pdf")
         try:
             pdf.output(path)
@@ -201,7 +242,7 @@ if st.session_state.carrito:
                 file_name="Pedido_Proforma.pdf",
                 mime="application/pdf"
             )
-            st.success("PDF generado exitosamente. ¡Haz clic en el botón de arriba para descargarlo!")
+            st.success("PDF generado exitosamente.")
         finally:
             os.close(fd)
 else:
